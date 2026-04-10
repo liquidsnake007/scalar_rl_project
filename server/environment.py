@@ -22,6 +22,9 @@ from models import (
 class FailureAnalyzerEnvironment:
 	"""Single-step scoring environment with easy/medium/hard diagnostics tasks."""
 
+	_MIN_SCORE = 0.01
+	_MAX_SCORE = 0.99
+
 	def __init__(self) -> None:
 		self.current_task = "easy"
 		self.step_count = 0
@@ -34,6 +37,11 @@ class FailureAnalyzerEnvironment:
 	@staticmethod
 	def _new_episode_id() -> str:
 		return str(uuid.uuid4())
+
+	@classmethod
+	def _strict_score(cls, score: float) -> float:
+		"""Clamp score to open interval (0, 1) required by the evaluator."""
+		return max(cls._MIN_SCORE, min(cls._MAX_SCORE, float(score)))
 
 	@staticmethod
 	def _easy_payload() -> Tuple[EasyObservation, Dict[str, str]]:
@@ -125,19 +133,19 @@ class FailureAnalyzerEnvironment:
 		service_ok = action.service_name.strip().lower() == self._ground_truth["service_name"].lower()
 		code_ok = action.error_code.strip().upper() == self._ground_truth["error_code"].upper()
 		if service_ok and code_ok:
-			return 1.0, "Correct service and error code."
+			return self._strict_score(1.0), "Correct service and error code."
 		if service_ok or code_ok:
-			return 0.5, "Partially correct."
-		return 0.0, "Incorrect diagnosis."
+			return self._strict_score(0.5), "Partially correct."
+		return self._strict_score(0.0), "Incorrect diagnosis."
 
 	def _score_medium(self, action: MediumAction) -> Tuple[float, str]:
 		root_ok = action.root_service.strip().lower() == self._ground_truth["root_service"].lower()
 		affected_ok = action.affected_service.strip().lower() == self._ground_truth["affected_service"].lower()
 		if root_ok and affected_ok:
-			return 1.0, "Correct root-cause chain."
+			return self._strict_score(1.0), "Correct root-cause chain."
 		if root_ok or affected_ok:
-			return 0.5, "Partially correct cascade mapping."
-		return 0.0, "Incorrect root-cause chain."
+			return self._strict_score(0.5), "Partially correct cascade mapping."
+		return self._strict_score(0.0), "Incorrect root-cause chain."
 
 	def _score_hard(self, action: HardAction) -> Tuple[float, str]:
 		checks = [
@@ -148,10 +156,10 @@ class FailureAnalyzerEnvironment:
 		]
 		score = round(sum(1 for ok in checks if ok) / 4.0, 2)
 		if score == 1.0:
-			return 1.0, "Correct complex failure diagnosis."
+			return self._strict_score(1.0), "Correct complex failure diagnosis."
 		if score >= 0.5:
-			return score, "Mostly correct complex diagnosis."
-		return score, "Diagnosis needs improvement."
+			return self._strict_score(score), "Mostly correct complex diagnosis."
+		return self._strict_score(score), "Diagnosis needs improvement."
 
 	def step(self, action: Dict[str, Any]) -> Tuple[EasyObservation | MediumObservation | HardObservation, float, bool, Dict[str, Any]]:
 		if self._last_observation is None:
@@ -202,7 +210,7 @@ class FailureAnalyzerEnvironment:
 				)
 		except ValidationError as exc:
 			info["error"] = str(exc)
-			score = 0.0
+			score = self._strict_score(0.0)
 			feedback = "Invalid action payload."
 			base = deepcopy(self._last_observation)
 			base.score = score
@@ -210,6 +218,7 @@ class FailureAnalyzerEnvironment:
 			base.done = True
 			obs = base
 
+		score = self._strict_score(score)
 		self.score = score
 		self.done = True
 		self._last_observation = obs
