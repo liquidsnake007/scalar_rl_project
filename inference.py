@@ -12,7 +12,7 @@ import time
 try:
     from openai import OpenAI
 except ImportError:
-    print("OpenAI package not found. Run: pip install openai")
+    print("OpenAI package not found. Run: pip install openai", file=sys.stderr)
     sys.exit(1)
 
 # ── Add project root to path ────────────────────────────────
@@ -20,12 +20,15 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from server.environment import FailureAnalyzerEnvironment
 
 # ── Configuration from environment variables ────────────────
-API_BASE_URL = os.environ.get("API_BASE_URL", "https://api-inference.huggingface.co/v1")
-MODEL_NAME   = os.environ.get("MODEL_NAME", "mistralai/Mistral-7B-Instruct-v0.3")
-HF_TOKEN     = os.environ.get("HF_TOKEN", "")
+API_BASE_URL = os.getenv("API_BASE_URL", "https://api-inference.huggingface.co/v1")
+MODEL_NAME = os.getenv("MODEL_NAME", "mistralai/Mistral-7B-Instruct-v0.3")
+HF_TOKEN = os.getenv("HF_TOKEN")
+
+# Optional: only needed if using from_docker_image() flows.
+LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
 
 # ── OpenAI-compatible client pointing at HF Inference ───────
-client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN or "missing-token")
+client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
 
 # ── The environment ──────────────────────────────────────────
 env = FailureAnalyzerEnvironment()
@@ -129,7 +132,7 @@ def call_llm(prompt: str) -> dict:
         return json.loads(raw)
 
     except json.JSONDecodeError as e:
-        print(f"  [WARNING] LLM returned invalid JSON: {e}")
+        print(f"LLM returned invalid JSON: {e}", file=sys.stderr)
         return {}
     except Exception as e:
         _ = e
@@ -183,7 +186,7 @@ def run_episode(task: str) -> dict:
     Runs one full episode for a given task.
     Returns results including score and all rewards.
     """
-    print(f"\n[START] task={task} env=failure_analyzer model={MODEL_NAME}")
+    print(f"[START] task={task} env=failure_analyzer model={MODEL_NAME}")
 
     # Reset the environment
     obs = env.reset(task=task)
