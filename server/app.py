@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
 import uvicorn
-from environment import FailureAnalyzerEnvironment
+from server.environment import FailureAnalyzerEnvironment
 
 # ── Create FastAPI app ──────────────────────────────────────
 app = FastAPI(
