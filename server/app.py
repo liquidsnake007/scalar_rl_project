@@ -6,7 +6,7 @@ import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Body, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
@@ -75,13 +75,13 @@ def root():
 
 
 @app.post("/reset")
-def reset(request: Optional[ResetRequest] = None):
+def reset(request: Optional[dict] = Body(default=None)):
     """
     Start a new episode.
     Body: {"task": "easy"} or {"task": "medium"} or {"task": "hard"}
     Returns the initial observation for the chosen task.
     """
-    task = (request.task if request else "easy") or "easy"
+    task = ((request or {}).get("task") or "easy")
     if task not in ["easy", "medium", "hard"]:
         raise HTTPException(
             status_code=400,
