@@ -6,7 +6,6 @@
 import os
 import json
 import sys
-import time
 
 # ── Try to import OpenAI client ─────────────────────────────
 try:
@@ -15,8 +14,6 @@ except ImportError:
     print("OpenAI package not found. Run: pip install openai", file=sys.stderr)
     sys.exit(1)
 
-# ── Add project root to path ────────────────────────────────
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from server.environment import FailureAnalyzerEnvironment
 
 # ── Configuration from environment variables ────────────────
@@ -117,7 +114,7 @@ def call_llm(prompt: str) -> dict:
                 }
             ],
             max_tokens=200,
-            temperature=0.1  # Low temperature for more consistent JSON output
+            temperature=0.0
         )
 
         raw = response.choices[0].message.content.strip()
@@ -217,7 +214,7 @@ def run_episode(task: str) -> dict:
 
         print(f"[STEP] step={step_num} action={action_str} reward={reward:.2f} done={str(done).lower()} error={error_in_info or 'null'}")
 
-        if reward >= 0.5:
+        if reward >= 0.99:
             success = True
 
     except Exception as e:
@@ -246,7 +243,6 @@ def main():
     for task in ["easy", "medium", "hard"]:
         result = run_episode(task)
         results.append(result)
-        time.sleep(1)  # Small pause between tasks
 
     _ = results
 

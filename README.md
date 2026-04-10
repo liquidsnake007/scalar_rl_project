@@ -32,9 +32,9 @@ what went wrong.
 ### ✅ Task 1 — Easy
 | Property | Value |
 |---|---|
-| Services | 1 service |
-| Error rate | 99% (obvious spike) |
-| Log quality | Full clean logs |
+| Services | 2-3 services in logs |
+| Error rate | obvious elevated failure signal |
+| Log quality | mostly clean with distractor entries |
 | Agent output | `{"service_name": "...", "error_code": "..."}` |
 | Grader | service_name=0.5 + error_code=0.5 = **1.0** |
 
@@ -42,17 +42,17 @@ what went wrong.
 | Property | Value |
 |---|---|
 | Services | 3 services |
-| Error rate | ~40% (subtle) |
-| Log quality | Partial — some entries missing |
+| Error rate | moderate degradation with cascading impact |
+| Log quality | partial timeline + correlated logs |
 | Agent output | `{"root_service": "...", "affected_service": "..."}` |
 | Grader | root_service=0.6 + affected_service=0.4 = **1.0** |
 
 ### ✅ Task 3 — Hard
 | Property | Value |
 |---|---|
-| Services | 6 services |
-| Error rate | ~8% (intermittent) |
-| Log quality | Noisy — contains red herrings |
+| Services | 5-6 services across trace graph |
+| Error rate | low but meaningful intermittent/sustained signal |
+| Log quality | noisy and partially misleading |
 | Agent output | `{"root_service":"...","endpoint":"...","failure_pattern":"...","severity":"..."}` |
 | Grader | root=0.4 + endpoint=0.2 + pattern=0.2 + severity=0.2 = **1.0** |
 
@@ -69,6 +69,8 @@ what went wrong.
 
 Partial credit is awarded per field — a partially right answer always gets a
 meaningful non-zero score, which gives RL agents a useful learning signal.
+
+Scoring is clamped to the closed interval **[0.0, 1.0]** to match `openenv.yaml`.
 
 ---
 
@@ -89,15 +91,17 @@ uvicorn server.app:app --host 0.0.0.0 --port 7860
 # Reset to easy task
 curl -X POST http://localhost:7860/reset \
   -H "Content-Type: application/json" \
-  -d '{"task": "easy"}'
+  -H "X-Session-ID: local-dev" \
+  -d '{"task": "easy", "seed": 42}'
 
 # Submit an answer
 curl -X POST http://localhost:7860/step \
   -H "Content-Type: application/json" \
-  -d '{"service_name": "payment-api", "error_code": "HTTP_500"}'
+  -H "X-Session-ID: local-dev" \
+  -d '{"service_name": "session-service", "error_code": "RATE_LIMIT"}'
 
 # Check current state
-curl http://localhost:7860/state
+curl -H "X-Session-ID: local-dev" http://localhost:7860/state
 ```
 
 ### 4. Run the inference script
@@ -133,9 +137,10 @@ curl -X POST http://localhost:7860/reset \
 ```
 failure_analyzer/
 ├── models.py              ← Pydantic Action + Observation models
-├── __init__.py
-├── environment.py     ← Game logic, log generators, reward graders
-│app.py             ← FastAPI server (/reset /step /state)
+├── server/
+│   ├── __init__.py
+│   ├── environment.py     ← Game logic, scenario generators, reward graders
+│   └── app.py             ← FastAPI server (/reset /step /state)
 ├── inference.py           ← LLM agent with exact required log format
 ├── requirements.txt       ← Python dependencies
 ├── Dockerfile             ← Container for HF Spaces (port 7860)
@@ -150,9 +155,11 @@ failure_analyzer/
 | Endpoint | Method | Body | Description |
 |---|---|---|---|
 | `/` | GET | — | Health check |
-| `/reset` | POST | `{"task": "easy"}` | Start new episode |
+| `/reset` | POST | `{"task": "easy", "seed": 42}` | Start new episode |
 | `/step` | POST | task-specific JSON | Submit answer |
 | `/state` | GET | — | Current env state |
+
+Use `X-Session-ID` to isolate episodes across concurrent users/evaluators.
 
 ---
 
@@ -160,7 +167,7 @@ failure_analyzer/
 
 ### Easy
 ```json
-{"service_name": "payment-api", "error_code": "HTTP_500"}
+{"service_name": "payment-api", "error_code": "TIMEOUT"}
 ```
 
 ### Medium
@@ -189,7 +196,7 @@ failure_analyzer/
 
 ```
 [START] task=easy env=failure_analyzer model=mistralai/Mistral-7B-Instruct-v0.3
-[STEP] step=1 action={"service_name":"payment-api","error_code":"HTTP_500"} reward=1.00 done=true error=null
+[STEP] step=1 action={"service_name":"payment-api","error_code":"TIMEOUT"} reward=1.00 done=true error=null
 [END] success=true steps=1 score=1.00 rewards=1.00
 
 [START] task=medium env=failure_analyzer model=mistralai/Mistral-7B-Instruct-v0.3
@@ -197,6 +204,6 @@ failure_analyzer/
 [END] success=true steps=1 score=1.00 rewards=1.00
 
 [START] task=hard env=failure_analyzer model=mistralai/Mistral-7B-Instruct-v0.3
-[STEP] step=1 action={"root_service":"user-db","endpoint":"/api/v1/query","failure_pattern":"intermittent_timeout","severity":"high"} reward=1.00 done=true error=null
+[STEP] step=1 action={"root_service":"search-api","endpoint":"/api/v1/query","failure_pattern":"connection_pool_exhausted","severity":"high"} reward=1.00 done=true error=null
 [END] success=true steps=1 score=1.00 rewards=1.00
 ```

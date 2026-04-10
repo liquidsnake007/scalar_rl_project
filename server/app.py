@@ -2,15 +2,13 @@
 # FastAPI web server that exposes the environment as HTTP endpoints.
 # Endpoints: POST /reset, POST /step, GET /state
 
-import sys
-import os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-
-from fastapi import Body, FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
 from typing import Optional
+
+from fastapi import Body, FastAPI, Header, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, ConfigDict
 import uvicorn
+
 from server.environment import FailureAnalyzerEnvironment
 
 # ── Create FastAPI app ──────────────────────────────────────
@@ -31,8 +29,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── Single shared environment instance ─────────────────────
-env = FailureAnalyzerEnvironment()
+# ── Session-scoped environment instances ───────────────────
+envs: dict[str, FailureAnalyzerEnvironment] = {}
+
+
+def get_env(session_id: str) -> FailureAnalyzerEnvironment:
+    key = session_id.strip() or "default"
+    if key not in envs:
+        envs[key] = FailureAnalyzerEnvironment()
+    return envs[key]
 
 
 def model_to_dict(model_obj):
@@ -44,10 +49,15 @@ def model_to_dict(model_obj):
 # ── Request/Response models for API ────────────────────────
 
 class ResetRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     task: Optional[str] = "easy"  # "easy", "medium", or "hard"
+    seed: Optional[int] = None
 
 
 class StepRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     # Easy task fields
     service_name: Optional[str] = None
     error_code: Optional[str] = None
@@ -75,27 +85,28 @@ def root():
 
 
 @app.post("/reset")
-def reset(request: Optional[dict] = Body(default=None)):
+def reset(request: ResetRequest = Body(default_factory=ResetRequest), x_session_id: Optional[str] = Header(default="default", alias="X-Session-ID")):
     """
     Start a new episode.
     Body: {"task": "easy"} or {"task": "medium"} or {"task": "hard"}
     Returns the initial observation for the chosen task.
     """
-    task = ((request or {}).get("task") or "easy")
+    task = (request.task or "easy")
     if task not in ["easy", "medium", "hard"]:
         raise HTTPException(
             status_code=400,
             detail=f"Invalid task '{task}'. Must be 'easy', 'medium', or 'hard'."
         )
     try:
-        obs = env.reset(task=task)
+        env = get_env(x_session_id or "default")
+        obs = env.reset(task=task, seed=request.seed)
         return model_to_dict(obs)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/step")
-def step(request: StepRequest):
+def step(request: StepRequest, x_session_id: Optional[str] = Header(default="default", alias="X-Session-ID")):
     """
     Submit the agent's answer and receive a reward score.
     For easy task:   {"service_name": "...", "error_code": "..."}
@@ -115,6 +126,7 @@ def step(request: StepRequest):
         )
 
     try:
+        env = get_env(x_session_id or "default")
         obs, reward, done, info = env.step(action)
         return {
             "observation": model_to_dict(obs),
@@ -127,12 +139,13 @@ def step(request: StepRequest):
 
 
 @app.get("/state")
-def state():
+def state(x_session_id: Optional[str] = Header(default="default", alias="X-Session-ID")):
     """
     Get the current internal state of the environment.
     Returns: current_task, step_count, score, done, episode_id.
     """
     try:
+        env = get_env(x_session_id or "default")
         return model_to_dict(env.state())
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
