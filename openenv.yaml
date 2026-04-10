@@ -1,0 +1,32 @@
+spec_version: v1
+name: distributed-systems-failure-analyzer
+description: >-
+  OpenEnv-compatible failure analysis environment with easy, medium, and hard
+  diagnosis tasks.
+entrypoint:
+  type: http
+  host: 0.0.0.0
+  port: 7860
+  base_path: /
+
+api:
+  reset:
+    method: POST
+    path: /reset
+  step:
+    method: POST
+    path: /step
+  state:
+    method: GET
+    path: /state
+
+tasks:
+  - id: easy
+    description: Identify failing service and error code from logs.
+    reward_range: [0.0, 1.0]
+  - id: medium
+    description: Identify root service and impacted downstream service.
+    reward_range: [0.0, 1.0]
+  - id: hard
+    description: Identify subtle failure pattern and severity.
+    reward_range: [0.0, 1.0]
