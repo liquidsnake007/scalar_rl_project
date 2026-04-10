@@ -62,15 +62,15 @@ what went wrong.
 
 | Result | Score |
 |---|---|
-| All fields correct | **1.0** |
+| All fields correct | **0.99** |
 | Most fields correct | **0.6 – 0.8** |
 | Some fields correct | **0.2 – 0.5** |
-| All fields wrong | **0.0** |
+| All fields wrong | **0.01** |
 
 Partial credit is awarded per field — a partially right answer always gets a
 meaningful non-zero score, which gives RL agents a useful learning signal.
 
-Scoring is clamped to the closed interval **[0.0, 1.0]** to match `openenv.yaml`.
+Scoring is clamped to the strict open interval **(0, 1)** to satisfy evaluator rules.
 
 ---
 
@@ -196,14 +196,14 @@ Use `X-Session-ID` to isolate episodes across concurrent users/evaluators.
 
 ```
 [START] task=easy env=failure_analyzer model=mistralai/Mistral-7B-Instruct-v0.3
-[STEP] step=1 action={"service_name":"payment-api","error_code":"TIMEOUT"} reward=1.00 done=true error=null
-[END] success=true steps=1 score=1.00 rewards=1.00
+[STEP] step=1 action={"service_name":"payment-api","error_code":"TIMEOUT"} reward=0.99 done=true error=null
+[END] success=true steps=1 score=0.99 rewards=0.99
 
 [START] task=medium env=failure_analyzer model=mistralai/Mistral-7B-Instruct-v0.3
-[STEP] step=1 action={"root_service":"auth-service","affected_service":"checkout-api"} reward=1.00 done=true error=null
-[END] success=true steps=1 score=1.00 rewards=1.00
+[STEP] step=1 action={"root_service":"auth-service","affected_service":"checkout-api"} reward=0.99 done=true error=null
+[END] success=true steps=1 score=0.99 rewards=0.99
 
 [START] task=hard env=failure_analyzer model=mistralai/Mistral-7B-Instruct-v0.3
-[STEP] step=1 action={"root_service":"search-api","endpoint":"/api/v1/query","failure_pattern":"connection_pool_exhausted","severity":"high"} reward=1.00 done=true error=null
-[END] success=true steps=1 score=1.00 rewards=1.00
+[STEP] step=1 action={"root_service":"search-api","endpoint":"/api/v1/query","failure_pattern":"connection_pool_exhausted","severity":"high"} reward=0.99 done=true error=null
+[END] success=true steps=1 score=0.99 rewards=0.99
 ```

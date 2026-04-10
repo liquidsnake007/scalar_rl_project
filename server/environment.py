@@ -23,8 +23,8 @@ from models import (
 class FailureAnalyzerEnvironment:
 	"""Single-step scoring environment with easy/medium/hard diagnostics tasks."""
 
-	_MIN_SCORE = 0.0
-	_MAX_SCORE = 1.0
+	_MIN_SCORE = 0.01
+	_MAX_SCORE = 0.99
 
 	_EASY_SCENARIOS = [
 		{
@@ -204,7 +204,7 @@ class FailureAnalyzerEnvironment:
 
 	@classmethod
 	def _strict_score(cls, score: float) -> float:
-		"""Clamp score to closed interval [0, 1] required by openenv.yaml."""
+		"""Clamp score to strict open interval (0, 1) required by evaluator."""
 		return max(cls._MIN_SCORE, min(cls._MAX_SCORE, float(score)))
 
 	def _choose_scenario(self, scenarios: list[Dict[str, Any]], seed: int | None) -> Dict[str, Any]:
