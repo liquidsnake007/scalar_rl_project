@@ -75,13 +75,13 @@ def root():
 
 
 @app.post("/reset")
-def reset(request: ResetRequest):
+def reset(request: Optional[ResetRequest] = None):
     """
     Start a new episode.
     Body: {"task": "easy"} or {"task": "medium"} or {"task": "hard"}
     Returns the initial observation for the chosen task.
     """
-    task = request.task or "easy"
+    task = (request.task if request else "easy") or "easy"
     if task not in ["easy", "medium", "hard"]:
         raise HTTPException(
             status_code=400,
