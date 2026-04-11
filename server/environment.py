@@ -21,10 +21,17 @@ from models import (
 
 
 class FailureAnalyzerEnvironment:
-	"""Single-step scoring environment with easy/medium/hard diagnostics tasks."""
+	"""Multi-step scoring environment with evidence gathering and final diagnosis."""
 
 	_MIN_SCORE = 0.01
 	_MAX_SCORE = 0.99
+	_MAX_STEPS = {"easy": 4, "medium": 5, "hard": 6}
+	_REQUIRED_EVIDENCE = {
+		"easy": {"logs"},
+		"medium": {"logs", "timeline"},
+		"hard": {"logs", "timeline", "trace_graph"},
+	}
+	_UNSAFE_KEYWORDS = ("drop", "delete", "kill", "restart", "shutdown", "truncate")
 
 	_EASY_SCENARIOS = [
 		{
@@ -195,7 +202,14 @@ class FailureAnalyzerEnvironment:
 		self.done = False
 		self.episode_id = self._new_episode_id()
 		self.seed: int | None = None
+		self.max_steps = self._MAX_STEPS["easy"]
 		self._ground_truth: Dict[str, Any] = {}
+		self._scenario: Dict[str, Any] = {}
+		self._revealed_sections: set[str] = set()
+		self._inspected_targets: set[str] = set()
+		self._hypotheses: set[str] = set()
+		self._penalties: list[str] = []
+		self._reward_history: list[float] = []
 		self._last_observation: EasyObservation | MediumObservation | HardObservation | None = None
 
 	@staticmethod
@@ -212,32 +226,117 @@ class FailureAnalyzerEnvironment:
 			return random.choice(scenarios)
 		return scenarios[random.Random(seed).randrange(len(scenarios))]
 
-	def _easy_payload(self, seed: int | None) -> Tuple[EasyObservation, Dict[str, str]]:
-		scenario = self._choose_scenario(self._EASY_SCENARIOS, seed)
-		obs = EasyObservation(
-			task_description=scenario["task_description"],
-			logs=scenario["logs"],
-		)
-		return obs, deepcopy(scenario["truth"])
+	def _easy_payload(self, seed: int | None) -> Dict[str, Any]:
+		return deepcopy(self._choose_scenario(self._EASY_SCENARIOS, seed))
 
-	def _medium_payload(self, seed: int | None) -> Tuple[MediumObservation, Dict[str, str]]:
-		scenario = self._choose_scenario(self._MEDIUM_SCENARIOS, seed)
-		obs = MediumObservation(
-			task_description=scenario["task_description"],
-			logs=scenario["logs"],
-			timeline=scenario["timeline"],
-		)
-		return obs, deepcopy(scenario["truth"])
+	def _medium_payload(self, seed: int | None) -> Dict[str, Any]:
+		return deepcopy(self._choose_scenario(self._MEDIUM_SCENARIOS, seed))
 
-	def _hard_payload(self, seed: int | None) -> Tuple[HardObservation, Dict[str, str]]:
-		scenario = self._choose_scenario(self._HARD_SCENARIOS, seed)
-		obs = HardObservation(
-			task_description=scenario["task_description"],
-			logs=scenario["logs"],
-			trace_graph=scenario["trace_graph"],
-			timeline=scenario["timeline"],
+	def _hard_payload(self, seed: int | None) -> Dict[str, Any]:
+		return deepcopy(self._choose_scenario(self._HARD_SCENARIOS, seed))
+
+	def _looks_like_final(self, action: Dict[str, Any]) -> bool:
+		if self.current_task == "easy":
+			return {"service_name", "error_code"}.issubset(set(action.keys()))
+		if self.current_task == "medium":
+			return {"root_service", "affected_service"}.issubset(set(action.keys()))
+		return {"root_service", "endpoint", "failure_pattern", "severity"}.issubset(set(action.keys()))
+
+	def _available_actions(self) -> list[str]:
+		actions = ["inspect_logs", "submit_hypothesis", "finalize", "apply_mitigation"]
+		if self.current_task in {"medium", "hard"}:
+			actions.insert(1, "inspect_timeline")
+		if self.current_task == "hard":
+			actions.insert(2, "inspect_trace")
+		return actions
+
+	def _safe_graph(self) -> Dict[str, Any]:
+		if "trace_graph" in self._revealed_sections:
+			return deepcopy(self._scenario.get("trace_graph", {}))
+		return {"nodes": [], "edges": []}
+
+	def _safe_timeline(self) -> list[str]:
+		if "timeline" in self._revealed_sections:
+			return deepcopy(self._scenario.get("timeline", []))
+		return []
+
+	def _build_observation(
+		self,
+		feedback: str,
+		done: bool,
+	) -> EasyObservation | MediumObservation | HardObservation:
+		base = {
+			"task": self.current_task,
+			"task_description": self._scenario.get("task_description", ""),
+			"logs": deepcopy(self._scenario.get("logs", [])),
+			"step_index": self.step_count,
+			"max_steps": self.max_steps,
+			"available_actions": [] if done else self._available_actions(),
+			"revealed_sections": sorted(self._revealed_sections),
+			"penalties": deepcopy(self._penalties),
+			"score": self.score,
+			"feedback": feedback,
+			"done": done,
+		}
+		if self.current_task == "easy":
+			return EasyObservation(**base)
+		if self.current_task == "medium":
+			return MediumObservation(**(base | {"timeline": self._safe_timeline()}))
+		return HardObservation(
+			**(
+				base
+				| {
+					"timeline": self._safe_timeline(),
+					"trace_graph": self._safe_graph(),
+				}
+			)
 		)
-		return obs, deepcopy(scenario["truth"])
+
+	def _record_reward(self, reward: float) -> float:
+		r = self._strict_score(reward)
+		self._reward_history.append(r)
+		self.score = self._strict_score(sum(self._reward_history) / len(self._reward_history))
+		return r
+
+	def _evidence_ratio(self) -> float:
+		required = self._REQUIRED_EVIDENCE[self.current_task]
+		return len(required.intersection(self._revealed_sections)) / len(required)
+
+	def _apply_penalty(self, name: str) -> None:
+		self._penalties.append(name)
+
+	def _handle_finalize(self, action: Dict[str, Any]) -> Tuple[float, str, bool, Dict[str, Any]]:
+		final_payload = {
+			k: v
+			for k, v in action.items()
+			if k not in {"action_type", "target_service", "note", "mitigation_action"}
+		}
+		try:
+			if self.current_task == "easy":
+				parsed = EasyAction(**final_payload)
+				base_score, base_feedback = self._score_easy(parsed)
+			elif self.current_task == "medium":
+				parsed = MediumAction(**final_payload)
+				base_score, base_feedback = self._score_medium(parsed)
+			else:
+				parsed = HardAction(**final_payload)
+				base_score, base_feedback = self._score_hard(parsed)
+		except ValidationError as exc:
+			self._apply_penalty("invalid_finalize_payload")
+			info = {"error": str(exc), "penalties": deepcopy(self._penalties)}
+			done = self.step_count >= self.max_steps
+			reward = self._record_reward(0.08)
+			feedback = "Invalid final answer payload. Provide required fields for this task."
+			return reward, feedback, done, info
+
+		evidence_ratio = self._evidence_ratio()
+		efficiency_bonus = max(0.0, (self.max_steps - self.step_count) / self.max_steps) * 0.08
+		penalty_cost = min(0.24, 0.06 * len(self._penalties))
+		final_reward = (base_score * 0.72) + (evidence_ratio * 0.20) + efficiency_bonus - penalty_cost
+		reward = self._record_reward(final_reward)
+		feedback = f"{base_feedback} Evidence coverage={evidence_ratio:.2f}."
+		info = {"error": None, "penalties": deepcopy(self._penalties), "evidence_ratio": evidence_ratio}
+		return reward, feedback, True, info
 
 	def reset(self, task: str = "easy", seed: int | None = None) -> EasyObservation | MediumObservation | HardObservation:
 		task_name = (task or "easy").strip().lower()
@@ -250,15 +349,23 @@ class FailureAnalyzerEnvironment:
 		self.done = False
 		self.episode_id = self._new_episode_id()
 		self.seed = seed
+		self.max_steps = self._MAX_STEPS[task_name]
+		self._revealed_sections = {"logs"}
+		self._inspected_targets = set()
+		self._hypotheses = set()
+		self._penalties = []
+		self._reward_history = []
 
 		if task_name == "easy":
-			obs, truth = self._easy_payload(seed)
+			scenario = self._easy_payload(seed)
 		elif task_name == "medium":
-			obs, truth = self._medium_payload(seed)
+			scenario = self._medium_payload(seed)
 		else:
-			obs, truth = self._hard_payload(seed)
+			scenario = self._hard_payload(seed)
 
-		self._ground_truth = truth
+		self._scenario = scenario
+		self._ground_truth = deepcopy(scenario["truth"])
+		obs = self._build_observation(feedback="Episode reset. Gather evidence before finalizing diagnosis.", done=False)
 		self._last_observation = obs
 		return deepcopy(obs)
 
@@ -302,60 +409,96 @@ class FailureAnalyzerEnvironment:
 			return deepcopy(self._last_observation), self.score, True, {"error": "episode_done"}
 
 		self.step_count += 1
-		info: Dict[str, Any] = {"error": None}
+		info: Dict[str, Any] = {"error": None, "penalties": deepcopy(self._penalties)}
 
-		try:
-			if self.current_task == "easy":
-				parsed = EasyAction(**action)
-				score, feedback = self._score_easy(parsed)
-				obs = EasyObservation(
-					task="easy",
-					task_description=self._last_observation.task_description,
-					logs=self._last_observation.logs,
-					score=score,
-					feedback=feedback,
-					done=True,
-				)
-			elif self.current_task == "medium":
-				parsed = MediumAction(**action)
-				score, feedback = self._score_medium(parsed)
-				obs = MediumObservation(
-					task="medium",
-					task_description=self._last_observation.task_description,
-					logs=self._last_observation.logs,
-					timeline=self._last_observation.timeline,
-					score=score,
-					feedback=feedback,
-					done=True,
-				)
+		action_type = str(action.get("action_type", "")).strip().lower()
+		if not action_type:
+			action_type = "finalize" if self._looks_like_final(action) else "inspect_logs"
+
+		done = False
+		feedback = ""
+		if action_type == "finalize":
+			reward, feedback, done, finalize_info = self._handle_finalize(action)
+			info.update(finalize_info)
+		elif action_type == "inspect_logs":
+			target = str(action.get("target_service", "")).strip().lower()
+			if target and target in self._inspected_targets:
+				self._apply_penalty("redundant_log_probe")
+				reward = self._record_reward(0.12)
+				feedback = "Redundant log inspection. Probe a new service or finalize."
 			else:
-				parsed = HardAction(**action)
-				score, feedback = self._score_hard(parsed)
-				obs = HardObservation(
-					task="hard",
-					task_description=self._last_observation.task_description,
-					logs=self._last_observation.logs,
-					trace_graph=self._last_observation.trace_graph,
-					timeline=self._last_observation.timeline,
-					score=score,
-					feedback=feedback,
-					done=True,
-				)
-		except ValidationError as exc:
-			info["error"] = str(exc)
-			score = self._strict_score(0.0)
-			feedback = "Invalid action payload."
-			base = deepcopy(self._last_observation)
-			base.score = score
-			base.feedback = feedback
-			base.done = True
-			obs = base
+				if target:
+					self._inspected_targets.add(target)
+				reward = self._record_reward(0.62)
+				feedback = "Useful evidence gathered from logs."
+		elif action_type == "inspect_timeline":
+			if self.current_task == "easy":
+				self._apply_penalty("invalid_timeline_probe")
+				reward = self._record_reward(0.08)
+				feedback = "Timeline is not available for easy task."
+			elif "timeline" in self._revealed_sections:
+				self._apply_penalty("redundant_timeline_probe")
+				reward = self._record_reward(0.14)
+				feedback = "Timeline already revealed; avoid repeated probes."
+			else:
+				self._revealed_sections.add("timeline")
+				reward = self._record_reward(0.66)
+				feedback = "Timeline revealed."
+		elif action_type == "inspect_trace":
+			if self.current_task != "hard":
+				self._apply_penalty("invalid_trace_probe")
+				reward = self._record_reward(0.08)
+				feedback = "Trace graph is only available for hard task."
+			elif "trace_graph" in self._revealed_sections:
+				self._apply_penalty("redundant_trace_probe")
+				reward = self._record_reward(0.14)
+				feedback = "Trace graph already revealed; avoid repeated probes."
+			else:
+				self._revealed_sections.add("trace_graph")
+				reward = self._record_reward(0.68)
+				feedback = "Trace graph revealed."
+		elif action_type == "submit_hypothesis":
+			note = str(action.get("note", "")).strip().lower()
+			if len(note) < 10:
+				self._apply_penalty("low_quality_hypothesis")
+				reward = self._record_reward(0.18)
+				feedback = "Hypothesis too weak. Add concrete causal reasoning."
+			elif note in self._hypotheses:
+				self._apply_penalty("repeated_hypothesis")
+				reward = self._record_reward(0.16)
+				feedback = "Repeated hypothesis. Provide a new diagnostic angle."
+			else:
+				self._hypotheses.add(note)
+				reward = self._record_reward(0.58)
+				feedback = "Hypothesis recorded."
+		elif action_type == "apply_mitigation":
+			mitigation = str(action.get("mitigation_action", "")).strip().lower()
+			if any(word in mitigation for word in self._UNSAFE_KEYWORDS):
+				self._apply_penalty("unsafe_mitigation")
+				reward = self._record_reward(0.03)
+				feedback = "Unsafe mitigation attempt penalized. Diagnose first, then act safely."
+			else:
+				self._apply_penalty("premature_mitigation")
+				reward = self._record_reward(0.22)
+				feedback = "Mitigation without strong evidence is discouraged."
+		else:
+			self._apply_penalty("unknown_action_type")
+			reward = self._record_reward(0.08)
+			feedback = f"Unknown action_type '{action_type}'."
 
-		score = self._strict_score(score)
-		self.score = score
-		self.done = True
+		if not done and self.step_count >= self.max_steps:
+			evidence_ratio = self._evidence_ratio()
+			penalty_cost = min(0.24, 0.06 * len(self._penalties))
+			reward = self._record_reward(0.18 + (0.25 * evidence_ratio) - penalty_cost)
+			feedback = "Episode ended due to step limit before final diagnosis."
+			done = True
+			info["error"] = info.get("error") or "max_steps_reached"
+
+		self.done = done
+		obs = self._build_observation(feedback=feedback, done=done)
 		self._last_observation = obs
-		return deepcopy(obs), score, True, info
+		info["penalties"] = deepcopy(self._penalties)
+		return deepcopy(obs), reward, done, info
 
 	def state(self) -> StateModel:
 		return StateModel(

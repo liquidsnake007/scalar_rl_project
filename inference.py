@@ -25,7 +25,9 @@ HF_TOKEN = os.getenv("HF_TOKEN")
 LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
 
 # ── OpenAI-compatible client pointing at HF Inference ───────
-client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
+client = None
+if HF_TOKEN:
+    client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
 
 # ── The environment ──────────────────────────────────────────
 env = FailureAnalyzerEnvironment()
@@ -100,6 +102,8 @@ Do not add any explanation. Only output the JSON."""
 
 def call_llm(prompt: str) -> dict:
     """Calls the LLM and parses the JSON response."""
+    if client is None:
+        return {}
     try:
         response = client.chat.completions.create(
             model=MODEL_NAME,
@@ -152,13 +156,26 @@ def fallback_action(obs_dict: dict, task: str) -> dict:
         logs = obs_dict.get("logs", [])
         root = ""
         affected = ""
-        for row in logs:
-            msg = str(row.get("message", "")).lower()
-            service = row.get("service", "")
-            if "db connection" in msg or "starts failing" in msg:
-                root = service
-            if "503" in msg:
-                affected = service
+
+        ranked = sorted(
+            [row for row in logs if isinstance(row.get("ratio"), (int, float))],
+            key=lambda row: float(row.get("ratio", 0.0)),
+            reverse=True,
+        )
+        if ranked:
+            root = ranked[0].get("service", "")
+            if len(ranked) > 1:
+                affected = ranked[1].get("service", "")
+
+        if not root or not affected:
+            for row in logs:
+                msg = str(row.get("message", "")).lower()
+                service = row.get("service", "")
+                if "db connection" in msg or "starts failing" in msg:
+                    root = service
+                if "503" in msg:
+                    affected = service
+
         return {"root_service": root, "affected_service": affected}
 
     if task == "hard":
@@ -172,6 +189,38 @@ def fallback_action(obs_dict: dict, task: str) -> dict:
                 "severity": "high",
             }
     return {}
+
+
+def choose_action(obs_dict: dict, task: str, step_num: int) -> dict:
+    """Policy for multi-step episodes: gather evidence, form hypothesis, then finalize."""
+    revealed = set(obs_dict.get("revealed_sections", []))
+
+    if step_num == 1:
+        logs = obs_dict.get("logs", [])
+        first_service = logs[0].get("service", "") if logs else ""
+        return {
+            "action_type": "inspect_logs",
+            "target_service": first_service,
+        }
+
+    if task in {"medium", "hard"} and "timeline" not in revealed:
+        return {"action_type": "inspect_timeline"}
+
+    if task == "hard" and "trace_graph" not in revealed:
+        return {"action_type": "inspect_trace"}
+
+    if step_num <= 3:
+        return {
+            "action_type": "submit_hypothesis",
+            "note": "Primary failure source appears upstream and propagates to dependent services.",
+        }
+
+    prompt = build_prompt(obs_dict, task)
+    final_action = call_llm(prompt)
+    if not final_action:
+        final_action = fallback_action(obs_dict, task)
+    final_action["action_type"] = "finalize"
+    return final_action
 
 
 # ─────────────────────────────────────────────────────────────
@@ -194,27 +243,26 @@ def run_episode(task: str) -> dict:
     success = False
     error_msg = None
     final_score = 0.0
+    done = False
 
     try:
-        step_num += 1
+        max_steps = int(obs_dict.get("max_steps", 6))
+        while (not done) and step_num < max_steps:
+            step_num += 1
 
-        # Build prompt and get LLM answer
-        prompt = build_prompt(obs_dict, task)
-        action = call_llm(prompt)
-        if not action:
-            action = fallback_action(obs_dict, task)
-        action_str = json.dumps(action)
+            action = choose_action(obs_dict, task, step_num)
+            action_str = json.dumps(action)
 
-        # Step the environment
-        result_obs, reward, done, info = env.step(action)
-        rewards.append(reward)
-        final_score = reward
+            result_obs, reward, done, info = env.step(action)
+            obs_dict = model_to_dict(result_obs)
 
-        error_in_info = info.get("error", None)
+            rewards.append(reward)
+            final_score = obs_dict.get("score", reward)
+            error_in_info = info.get("error", None)
 
-        print(f"[STEP] step={step_num} action={action_str} reward={reward:.2f} done={str(done).lower()} error={error_in_info or 'null'}")
+            print(f"[STEP] step={step_num} action={action_str} reward={reward:.2f} done={str(done).lower()} error={error_in_info or 'null'}")
 
-        if reward >= 0.99:
+        if done and rewards and rewards[-1] >= 0.50:
             success = True
 
     except Exception as e:

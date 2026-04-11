@@ -58,6 +58,11 @@ class ResetRequest(BaseModel):
 class StepRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    action_type: Optional[str] = None
+    target_service: Optional[str] = None
+    note: Optional[str] = None
+    mitigation_action: Optional[str] = None
+
     # Easy task fields
     service_name: Optional[str] = None
     error_code: Optional[str] = None
@@ -108,11 +113,15 @@ def reset(request: ResetRequest = Body(default_factory=ResetRequest), x_session_
 @app.post("/step")
 def step(request: StepRequest, x_session_id: Optional[str] = Header(default="default", alias="X-Session-ID")):
     """
-    Submit the agent's answer and receive a reward score.
+    Submit an investigation action and receive shaped reward signal.
+    Action types: inspect_logs, inspect_timeline, inspect_trace,
+    submit_hypothesis, apply_mitigation, finalize.
+    If action_type is omitted and final answer fields are present,
+    the action is treated as finalize for backward compatibility.
     For easy task:   {"service_name": "...", "error_code": "..."}
     For medium task: {"root_service": "...", "affected_service": "..."}
     For hard task:   {"root_service": "...", "endpoint": "...", "failure_pattern": "...", "severity": "..."}
-    Returns observation with score (0.0-1.0), feedback, and done=True.
+    Returns observation with progress score, per-step reward, and done flag.
     """
     if hasattr(request, "model_dump"):
         action = request.model_dump(exclude_none=True)

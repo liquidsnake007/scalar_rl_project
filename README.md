@@ -19,11 +19,12 @@ Built for the **Meta × PyTorch × Scaler OpenEnv Hackathon 2026**.
 ## 🎯 Problem Statement
 
 Real-world distributed systems fail in complex ways. This environment simulates
-realistic service logs at three difficulty levels — from an obvious single-service
-crash to a subtle intermittent failure buried across six noisy services.
+realistic incident triage at three difficulty levels — from obvious service failure
+to subtle intermittent degradation buried across noisy dependencies.
 
 The agent must act like a real **Site Reliability Engineer (SRE)** and diagnose
-what went wrong.
+what went wrong through a **multi-step workflow**: gather evidence, form
+hypotheses, avoid risky actions, then finalize a diagnosis.
 
 ---
 
@@ -60,15 +61,21 @@ what went wrong.
 
 ## 🏆 Reward Function
 
-| Result | Score |
+| Behavior | Typical per-step reward |
 |---|---|
-| All fields correct | **0.99** |
-| Most fields correct | **0.6 – 0.8** |
-| Some fields correct | **0.2 – 0.5** |
-| All fields wrong | **0.01** |
+| Useful evidence action (`inspect_*`) | **0.62 – 0.68** |
+| Good hypothesis update | **0.58** |
+| Redundant/low-quality behavior | **0.12 – 0.18** |
+| Unsafe mitigation attempt | **0.03** |
+| Final diagnosis (quality + evidence + efficiency, penalty-adjusted) | **0.01 – 0.99** |
 
-Partial credit is awarded per field — a partially right answer always gets a
-meaningful non-zero score, which gives RL agents a useful learning signal.
+The environment provides reward over the full trajectory, not only at episode end.
+Final diagnosis reward combines:
+
+- diagnosis accuracy
+- evidence coverage (logs/timeline/trace)
+- step efficiency
+- penalties for undesirable behavior (redundant probes, unsafe mitigations)
 
 Scoring is clamped to the strict open interval **(0, 1)** to satisfy evaluator rules.
 
@@ -156,7 +163,7 @@ failure_analyzer/
 |---|---|---|---|
 | `/` | GET | — | Health check |
 | `/reset` | POST | `{"task": "easy", "seed": 42}` | Start new episode |
-| `/step` | POST | task-specific JSON | Submit answer |
+| `/step` | POST | investigation or finalize JSON | Submit action |
 | `/state` | GET | — | Current env state |
 
 Use `X-Session-ID` to isolate episodes across concurrent users/evaluators.
@@ -165,22 +172,36 @@ Use `X-Session-ID` to isolate episodes across concurrent users/evaluators.
 
 ## 📐 Action Spaces
 
+### Investigation actions (all tasks)
+```json
+{"action_type": "inspect_logs", "target_service": "checkout-api"}
+```
+
+```json
+{"action_type": "submit_hypothesis", "note": "orders-db-proxy saturation is propagating to orders-api"}
+```
+
+```json
+{"action_type": "apply_mitigation", "mitigation_action": "restart orders-db-proxy"}
+```
+
 ### Easy
 ```json
-{"service_name": "payment-api", "error_code": "TIMEOUT"}
+{"action_type": "finalize", "service_name": "payment-api", "error_code": "TIMEOUT"}
 ```
 
 ### Medium
 ```json
-{"root_service": "auth-service", "affected_service": "checkout-api"}
+{"action_type": "finalize", "root_service": "auth-service", "affected_service": "gateway"}
 ```
 
 ### Hard
 ```json
 {
-  "root_service": "user-db",
+  "action_type": "finalize",
+  "root_service": "search-api",
   "endpoint": "/api/v1/query",
-  "failure_pattern": "intermittent_timeout",
+  "failure_pattern": "connection_pool_exhausted",
   "severity": "high"
 }
 ```
@@ -196,14 +217,19 @@ Use `X-Session-ID` to isolate episodes across concurrent users/evaluators.
 
 ```
 [START] task=easy env=failure_analyzer model=mistralai/Mistral-7B-Instruct-v0.3
-[STEP] step=1 action={"service_name":"payment-api","error_code":"TIMEOUT"} reward=0.99 done=true error=null
-[END] success=true steps=1 score=0.99 rewards=0.99
+[STEP] step=1 action={"action_type":"inspect_logs","target_service":"payment-api"} reward=0.62 done=false error=null
+[STEP] step=2 action={"action_type":"submit_hypothesis","note":"payment-api retry storm caused timeout spike"} reward=0.58 done=false error=null
+[STEP] step=3 action={"action_type":"finalize","service_name":"payment-api","error_code":"TIMEOUT"} reward=0.91 done=true error=null
+[END] success=true steps=3 score=0.70 rewards=0.62,0.58,0.91
 
 [START] task=medium env=failure_analyzer model=mistralai/Mistral-7B-Instruct-v0.3
-[STEP] step=1 action={"root_service":"auth-service","affected_service":"checkout-api"} reward=0.99 done=true error=null
-[END] success=true steps=1 score=0.99 rewards=0.99
+[STEP] step=1 action={"action_type":"inspect_timeline"} reward=0.66 done=false error=null
+[STEP] step=2 action={"action_type":"finalize","root_service":"auth-service","affected_service":"gateway"} reward=0.90 done=true error=null
+[END] success=true steps=2 score=0.78 rewards=0.66,0.90
 
 [START] task=hard env=failure_analyzer model=mistralai/Mistral-7B-Instruct-v0.3
-[STEP] step=1 action={"root_service":"search-api","endpoint":"/api/v1/query","failure_pattern":"connection_pool_exhausted","severity":"high"} reward=0.99 done=true error=null
-[END] success=true steps=1 score=0.99 rewards=0.99
+[STEP] step=1 action={"action_type":"inspect_timeline"} reward=0.66 done=false error=null
+[STEP] step=2 action={"action_type":"inspect_trace"} reward=0.68 done=false error=null
+[STEP] step=3 action={"action_type":"finalize","root_service":"search-api","endpoint":"/api/v1/query","failure_pattern":"connection_pool_exhausted","severity":"high"} reward=0.92 done=true error=null
+[END] success=true steps=3 score=0.75 rewards=0.66,0.68,0.92
 ```
